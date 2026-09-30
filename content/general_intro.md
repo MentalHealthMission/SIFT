@@ -2,8 +2,6 @@
 
 ![phone](/images/undraw_phone_no_bg.png)
 
-Please contact camilla.mapstone@manchester.ac.uk for any questions regarding this repository.
-
 This book provides a pipeline for data analysis, data cleaning, and
 feature extraction that can be applied to a range of smartphone and wearable
 datasets. It is built from a [GitHub repository](https://github.com/MentalHealthMission/data-book), which contains all the code
