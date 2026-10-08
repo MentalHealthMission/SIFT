@@ -9,86 +9,77 @@ def investigate_sleep_blocks(
     files_list: list[str],
     timestamp_col: str,
     sleep_level_col: str,
+    awake_string: str,
+    gap_thresh: float,
     duration_col=None,
     end_time_col=None,
     convert_to_unix=None,
     filter_dict=None,
+    time_zone="Europe/London",
 ):
     """
     Returns a list of the length of each 'block' of sleep across all the files in files_list.
     """
-    # TODO refactor this.
-    # TODO add documentation
     all_block_durations = []
-
-    original_timestamp = timestamp_col
+    all_TSTs = []
+    
     for path in files_list:
-        timestamp_col = original_timestamp
 
+        #Read in file and filter to useful rows if neccesary.
         try:
             if path[-3:] == "csv":
                 df = pd.read_csv(path)
             if path[-3:] == ".gz":
                 df = pd.read_csv(path, compression="gzip")
-        except Exception as e:
-            print(path + " file cannot be read, error: " + str(e))
+        except: 
+            print(path + " file cannot be read")
             continue
 
         df = df_filter(df, filter_dict)
+
         if len(df) > 0:
-            # convert to unix time if necessary
+
+            # Prepare the df for calcualting sleep blocks.
             if convert_to_unix is not None:
-                df = convert_to_unix_time(df, convert_to_unix)
-            if end_time_col is not None:
-                duration_col = "duration"
-                df[duration_col] = df[end_time_col] - df[timestamp_col]
-
+                df = convert_to_unix_time(df, convert_to_unix[0], convert_to_unix[1])
+            
+            df[timestamp_col] = df[timestamp_col].astype(float) # Do this to prevent warning further down.
+            
+            # Clean timestamp errors
             df = df.sort_values(by=timestamp_col).reset_index(drop=True)
-            # Clean EAS errors
-            df["gap"] = df[timestamp_col].shift(-1) - df[timestamp_col]
-            gaps = df[timestamp_col].diff().fillna(0)
-            group_ids = (gaps > 0).cumsum()  # Start a new group when difference > 0
+            if end_time_col is None:
+                df['end_time'] = df[timestamp_col]+df[duration_col]
+            else:
+                df['end_time'] = df[end_time_col]
+            df=clean_errors_with_durations(df, False, 30, timestamp_col, sleep_level_col, 'first', 'end_time')
+            df['duration'] = df['end_time'] - df[timestamp_col]
+            
+            #Remove awake datapoints.
+            df=df[df[sleep_level_col]!=awake_string].copy()
+            
+            # create a column 'group' that assigns the same number to all datapoints in the same sleep block
+            gaps = df[timestamp_col]-df['duration'].shift().fillna(0)-df[timestamp_col].shift().fillna(0) # time between timestamp and previous end time
+            group_ids = (gaps > gap_thresh).cumsum()  # Start a new group when difference > thresh
             df["group"] = group_ids
-            df["gap"] = df.groupby("group")["gap"].transform("max")
 
-            df = df[df[duration_col] > 0]
-            df.loc[df[duration_col] > df["gap"], duration_col] = 0
-            df["max duration"] = df.groupby("group")[duration_col].transform(
-                "max"
-            )  # get a column that is the max in the group
-            df.loc[df[duration_col] < df["max duration"], duration_col] = 0
-            # set all values less than the group max to zero
-            sum_ = df.groupby("group")[duration_col].sum()
-            df["sum"] = df["group"].map(sum_)
-            df["use_datapoint"] = ~((df[duration_col] == 0) & (df["sum"] != 0))
-            df[duration_col] = df.groupby("group")[duration_col].transform("max")
-            df.loc[df[duration_col] == 0, duration_col] = df["gap"]
-            mean_nonzero = (
-                df[df["use_datapoint"]].groupby("group")[sleep_level_col].agg("first")
-            )
-            df[sleep_level_col] = df["group"].map(mean_nonzero)
-
+            # aggregate to get start and end time of each block
             df = df.groupby("group", as_index=False).agg(
                 {
-                    duration_col: "first",
-                    sleep_level_col: "first",
                     timestamp_col: "first",
+                    'end_time': "last",
+                    'duration': "sum",
                 }
             )
 
-            df["end"] = df[timestamp_col] + df[duration_col]
-            df["time gap"] = df[timestamp_col] - df["end"].shift()
-            df = df[df["time gap"] > 0]
-            df["block duration"] = (
-                df[timestamp_col].shift(-1)
-                - df["time gap"].shift(-1)
-                - df[timestamp_col]
-            )
-            df["block duration"] = df["block duration"] / 3600
+            #Calculate the block duration, get max in each day (PSP), then add all non zero PSPs to list. 
+            df['block_duration'] = df['end_time'] - df[timestamp_col]
+            df['block_duration'] = df['block_duration'] / 3600
+            df[timestamp_col] = (pd.to_datetime(df['end_time'], unit="s", utc=True).dt.tz_convert(time_zone).dt.floor('D').astype('int64') // 10**9)
+            max_blocks = df.loc[df.groupby(timestamp_col)['block_duration'].idxmax(), [timestamp_col, 'block_duration', 'duration']]
+            all_block_durations.extend(max_blocks['block_duration'])
+            all_TSTs.extend(max_blocks['duration']/3600)
 
-            all_block_durations.extend(df["block duration"])
-
-    return all_block_durations
+    return all_block_durations, all_TSTs
 
 
 def find_time_of_timestamps(
@@ -162,3 +153,65 @@ def time_gap_freqs(
     df_first15 = counts_df.head(15)
 
     return df_first15
+
+def clean_errors_with_durations(
+    df, STG_fix, STG, time_stamp_col, measurement_col, meas_agg, end_time_col
+):
+    """
+    Cleans df of all timestamp errors according to the following rules:
+    1.datapoints with duration of 0 deleted
+    2.if duration overlaps next datapoint, it is capped to the time gap between this datapoint and
+    the next (the maximum possible duration)
+    3.if there are multiple durations for a timestamp, the highest duration that does not overlap
+    next datapoint is taken as correct duration, if all durations overlap than the maximum possible
+    duration used.
+    4. In the case of RT+CM, measured value is calculated according to meas_agg from all timestamps
+    that originally had the 'correct' duration (i.e the one that was there after the rule above),
+    or all timestamps if all datapoints originally overlapped. If all durations were the same
+    originally, then 'correct' measurement is just calculated from all timestamps.
+    5. if STG_fix is true, STG errors are treated as RT+CM errors - make gap sum instead? In this case,
+    timestamp_agg always has to be min for data with durations to avoid making gaps.
+    """
+    df = get_group_ids(df, time_stamp_col, STG_fix, STG)
+    next_group_time = df.groupby("group")[time_stamp_col].first()
+    df["next_group_time"] = df["group"].map(next_group_time.shift(-1))
+
+    df.loc[df[end_time_col] > df["next_group_time"], end_time_col] = 0
+    df["max end time"] = df.groupby("group")[end_time_col].transform(
+        "max"
+    )  # get a column that is the max in the group
+    df.loc[df[end_time_col] < df["max end time"], end_time_col] = 0
+    sum_ = df.groupby("group")[end_time_col].sum()
+    df["sum"] = df["group"].map(sum_)
+    df["use_datapoint"] = ~((df[end_time_col] == 0) & (df["sum"] != 0))
+    df[end_time_col] = df.groupby("group")[end_time_col].transform("max")
+    df.loc[df[end_time_col] == 0, end_time_col] = df["next_group_time"]
+    mean_nonzero = (
+        df[df["use_datapoint"]].groupby("group")[measurement_col].agg(meas_agg)
+    )
+    df[measurement_col] = df["group"].map(mean_nonzero)
+
+    df = df.groupby("group", as_index=False).agg(
+        {
+            end_time_col: "first",
+            measurement_col: "first",
+            time_stamp_col: "min",
+            
+        }
+    )
+    return df
+
+def get_group_ids(df, time_stamp_col, STG_fix, STG):
+    """
+    Add a column to df that assigns a 'group' to each row - all rows with same
+    timestamp, or timestamps within STG if STG_fix is True, will be assigned
+    same group.
+    """
+    gaps = df[time_stamp_col].diff().fillna(0)
+    if STG_fix:
+        group_ids = (gaps >= STG).cumsum()  # Start a new group when difference > STG
+    if not STG_fix:
+        group_ids = (gaps > 0).cumsum()  # Start a new group when difference > 0
+    df["group"] = group_ids
+
+    return df
