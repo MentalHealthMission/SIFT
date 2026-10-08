@@ -162,7 +162,8 @@ def get_timestamp_errors_and_clean(
     duration_col=None,
     filter_dict=None,
     convert_to_unix=None,
-    included_errors=["RT+CM", "STG+CM", "STG-CM"],
+    included_errors=["RT+CM", "STG+CM", "STG-CM", 'EAS'],
+    time_zone="Europe/London",
 ):
     """
     Produces metadata that can accompany any features extracted from the field
@@ -185,8 +186,8 @@ def get_timestamp_errors_and_clean(
     df = df_filter(df, filter_dict)
     # convert to unix time if neccessary
     if convert_to_unix is not None:
-        df = convert_to_unix_time(df, convert_to_unix)
-    if end_time_col is None and duration_col is None:
+        df = convert_to_unix_time(df, convert_to_unix, time_zone)
+    if end_time_col == None and duration_col == None:
         df = calculate_errors(df, time_stamp_col, measurement_col, STG)
         df = get_group_ids(df, time_stamp_col, STG_fix, STG)
         # Clean the input df of RT+CM and STG
@@ -201,14 +202,14 @@ def get_timestamp_errors_and_clean(
         )
         if "EAS" in included_errors:
             included_errors.remove("EAS")
-    if end_time_col is not None:
+    if end_time_col != None:
         df = calculate_error_with_endtime(
             df, time_stamp_col, measurement_col, end_time_col, STG, EAS_thresh
         )
         df = clean_errors_with_durations(
             df, STG_fix, STG, time_stamp_col, measurement_col, meas_agg, end_time_col
         )
-    if duration_col is not None:
+    if duration_col != None:
         df = calculate_errors_with_duration(
             df, time_stamp_col, measurement_col, duration_col, STG, EAS_thresh
         )
@@ -218,7 +219,7 @@ def get_timestamp_errors_and_clean(
         df[duration_col] = df["calc_end_time"] - df[time_stamp_col]
 
     # Convert df to right format for resampling
-    df["value.time.day"] = pd.to_datetime(df[time_stamp_col], unit="s", origin="unix")
+    df["value.time.day"] =pd.to_datetime(df[time_stamp_col], unit="s", utc=True).dt.tz_convert(time_zone).dt.tz_localize(None)
     index_to_drop = df[
         df["value.time.day"].dt.year == 1970
     ].index  # Remove rows where the year is 1970, which indicates no data was recorded
