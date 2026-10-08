@@ -178,20 +178,14 @@ def df_filter(df, filter_dict):
     return df
 
 
-def convert_to_unix_time(df: pd.DataFrame, cols: list):
-    """
-    Converts all columns in cols in the dataframe df to unix time.
-    """
-    # TODO: vectorize this.
+def convert_to_unix_time(df: pd.DataFrame, cols: list, time_zone="utc"):
+
     for col in cols:
-        df["converted_time"] = df[col]
-        for i in range(0, len(df)):
-            date_string = df[col][i]
-            date_format = "%Y-%m-%dT%H:%M:%S.%f"
-            datetime_object = datetime.datetime.strptime(date_string, date_format)
-            unix_timestamp = time.mktime(datetime_object.timetuple())
-            df.loc[i, "converted_time"] = unix_timestamp
-            df[col] = df["converted_time"]
-            # TODO delete converted_time col
+
+        df[col] = (
+    pd.to_datetime(df[col])
+      .dt.tz_localize(time_zone)
+      .astype('int64') / 10**9
+)
 
     return df
